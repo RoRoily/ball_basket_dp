@@ -139,6 +139,10 @@ class ObservationsCfg:
             func=mdp.body_pose_in_env,
             params={"asset_cfg": SceneEntityCfg("robot", body_names=["panda_hand"])},
         )
+        end_effector_vel = ObsTerm(
+            func=mdp.body_linear_velocity,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=["panda_hand"])},
+        )
         ball_pos = ObsTerm(func=mdp.ball_position, params={"asset_cfg": SceneEntityCfg("ball")})
         ball_vel = ObsTerm(func=mdp.ball_linear_velocity, params={"asset_cfg": SceneEntityCfg("ball")})
         basket_pos = ObsTerm(func=mdp.basket_position, params={"basket_center": BASKET_CENTER})

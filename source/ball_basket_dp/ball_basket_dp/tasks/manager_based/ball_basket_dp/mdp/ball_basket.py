@@ -50,6 +50,13 @@ def body_pose_in_env(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch
     return torch.cat((body_pos, body_quat), dim=-1)
 
 
+def body_linear_velocity(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Body linear velocity in world frame."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    body_id = asset_cfg.body_ids[0]
+    return asset.data.body_link_vel_w[:, body_id, :3]
+
+
 def basket_position(
     env: ManagerBasedRLEnv, basket_center: tuple[float, float, float] = (0.75, 0.0, 0.01)
 ) -> torch.Tensor:
