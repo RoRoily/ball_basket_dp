@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from isaaclab.assets import RigidObject
+from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 
 if TYPE_CHECKING:
@@ -36,6 +36,20 @@ def ball_linear_velocity(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = Sce
     return asset.data.root_lin_vel_w
 
 
+def body_pose_in_env(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Body pose with position expressed in each environment frame.
+
+    The quaternion remains in world orientation. For this task scaffold, the
+    robot bases are not rotated across environments, so this is a convenient
+    low-dimensional end-effector pose.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    body_id = asset_cfg.body_ids[0]
+    body_pos = asset.data.body_pos_w[:, body_id] - env.scene.env_origins
+    body_quat = asset.data.body_quat_w[:, body_id]
+    return torch.cat((body_pos, body_quat), dim=-1)
+
+
 def basket_position(
     env: ManagerBasedRLEnv, basket_center: tuple[float, float, float] = (0.75, 0.0, 0.01)
 ) -> torch.Tensor:
@@ -59,6 +73,16 @@ def ball_to_basket_distance(
 ) -> torch.Tensor:
     """Euclidean distance from ball center to basket center."""
     return torch.linalg.norm(ball_to_basket_vector(env, asset_cfg, basket_center), dim=1)
+
+
+def end_effector_to_ball_vector(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["panda_hand"]),
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+) -> torch.Tensor:
+    """Vector from Franka hand to ball center in each environment frame."""
+    ee_pos = body_pose_in_env(env, robot_cfg)[:, :3]
+    return ball_position(env, ball_cfg) - ee_pos
 
 
 def ball_in_basket(

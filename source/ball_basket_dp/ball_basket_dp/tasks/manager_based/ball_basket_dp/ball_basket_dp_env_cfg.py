@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -17,6 +17,14 @@ from isaaclab.utils import configclass
 
 from . import mdp
 
+from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG  # isort:skip
+
+BASKET_CENTER = (0.75, 0.0, 0.01)
+BALL_DEFAULT_POS = (0.35, 0.0, 0.04)
+BALL_RADIUS = 0.04
+BASKET_RADIUS = 0.18
+BASKET_Z_BOUNDS = (0.0, 0.20)
+
 
 ##
 # Scene definition
@@ -25,11 +33,11 @@ from . import mdp
 
 @configclass
 class BallBasketDpSceneCfg(InteractiveSceneCfg):
-    """Scene for the first headless ball-basket task.
+    """Scene for the headless low-dimensional ball-basket task.
 
-    This V0 intentionally has no robot. It lets us validate rigid object spawning,
-    reset randomization, low-dimensional observations, and success logic before
-    adding Franka control.
+    This version adds Franka joint control while keeping the task low-dimensional.
+    It is still a scaffolding environment: the scripted grasp/drop expert comes
+    after robot actions, observations, and object reset are verified together.
     """
 
     # ground plane
@@ -38,12 +46,15 @@ class BallBasketDpSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.GroundPlaneCfg(size=(100.0, 100.0)),
     )
 
+    # robot
+    robot: ArticulationCfg = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
     # task object
     ball = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Ball",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.35, 0.0, 0.04), rot=(1.0, 0.0, 0.0, 0.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=BALL_DEFAULT_POS, rot=(1.0, 0.0, 0.0, 0.0)),
         spawn=sim_utils.SphereCfg(
-            radius=0.04,
+            radius=BALL_RADIUS,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
                 solver_position_iteration_count=16,
@@ -66,9 +77,9 @@ class BallBasketDpSceneCfg(InteractiveSceneCfg):
     # fixed target marker. Success is computed geometrically around this center.
     basket_marker = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/BasketTarget",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.75, 0.0, 0.01), rot=(1.0, 0.0, 0.0, 0.0)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=BASKET_CENTER, rot=(1.0, 0.0, 0.0, 0.0)),
         spawn=sim_utils.CylinderCfg(
-            radius=0.18,
+            radius=BASKET_RADIUS,
             height=0.02,
             axis="Z",
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.35, 0.95)),
@@ -91,9 +102,18 @@ class BallBasketDpSceneCfg(InteractiveSceneCfg):
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    # No actions in V0. The scripted-expert/Franka action terms come after the
-    # object reset, observation, and success machinery is verified.
-    pass
+    arm_action = mdp.JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["panda_joint.*"],
+        scale=0.25,
+        use_default_offset=True,
+    )
+    gripper_action = mdp.BinaryJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["panda_finger_joint.*"],
+        open_command_expr={"panda_finger_joint.*": 0.04},
+        close_command_expr={"panda_finger_joint.*": 0.0},
+    )
 
 
 @configclass
@@ -105,12 +125,31 @@ class ObservationsCfg:
         """Observations for policy group."""
 
         # observation terms (order preserved)
+        joint_pos_rel = ObsTerm(
+            func=mdp.joint_pos_rel,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*", "panda_finger_joint.*"])},
+        )
+        joint_vel_rel = ObsTerm(
+            func=mdp.joint_vel_rel,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*", "panda_finger_joint.*"])},
+        )
+        end_effector_pose = ObsTerm(
+            func=mdp.body_pose_in_env,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=["panda_hand"])},
+        )
         ball_pos = ObsTerm(func=mdp.ball_position, params={"asset_cfg": SceneEntityCfg("ball")})
         ball_vel = ObsTerm(func=mdp.ball_linear_velocity, params={"asset_cfg": SceneEntityCfg("ball")})
-        basket_pos = ObsTerm(func=mdp.basket_position, params={"basket_center": (0.75, 0.0, 0.01)})
+        basket_pos = ObsTerm(func=mdp.basket_position, params={"basket_center": BASKET_CENTER})
         ball_to_basket = ObsTerm(
             func=mdp.ball_to_basket_vector,
-            params={"asset_cfg": SceneEntityCfg("ball"), "basket_center": (0.75, 0.0, 0.01)},
+            params={"asset_cfg": SceneEntityCfg("ball"), "basket_center": BASKET_CENTER},
+        )
+        ee_to_ball = ObsTerm(
+            func=mdp.end_effector_to_ball_vector,
+            params={
+                "robot_cfg": SceneEntityCfg("robot", body_names=["panda_hand"]),
+                "ball_cfg": SceneEntityCfg("ball"),
+            },
         )
 
         def __post_init__(self) -> None:
@@ -126,14 +165,24 @@ class EventCfg:
     """Configuration for events."""
 
     # reset
+    reset_robot_joints = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*", "panda_finger_joint.*"]),
+            "position_range": (-0.01, 0.01),
+            "velocity_range": (0.0, 0.0),
+        },
+    )
+
     reset_ball_position = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("ball"),
             "pose_range": {
-                "x": (-0.25, 0.25),
-                "y": (-0.35, 0.35),
+                "x": (-0.20, 0.12),
+                "y": (-0.30, 0.30),
                 "z": (0.0, 0.0),
                 "roll": (0.0, 0.0),
                 "pitch": (0.0, 0.0),
@@ -158,16 +207,16 @@ class RewardsCfg:
     distance_to_basket = RewTerm(
         func=mdp.ball_to_basket_distance,
         weight=-1.0,
-        params={"asset_cfg": SceneEntityCfg("ball"), "basket_center": (0.75, 0.0, 0.01)},
+        params={"asset_cfg": SceneEntityCfg("ball"), "basket_center": BASKET_CENTER},
     )
     in_basket = RewTerm(
         func=mdp.ball_in_basket_reward,
         weight=10.0,
         params={
             "asset_cfg": SceneEntityCfg("ball"),
-            "basket_center": (0.75, 0.0, 0.01),
-            "basket_radius": 0.18,
-            "z_bounds": (0.0, 0.20),
+            "basket_center": BASKET_CENTER,
+            "basket_radius": BASKET_RADIUS,
+            "z_bounds": BASKET_Z_BOUNDS,
         },
     )
 
@@ -183,9 +232,9 @@ class TerminationsCfg:
         func=mdp.ball_in_basket,
         params={
             "asset_cfg": SceneEntityCfg("ball"),
-            "basket_center": (0.75, 0.0, 0.01),
-            "basket_radius": 0.18,
-            "z_bounds": (0.0, 0.20),
+            "basket_center": BASKET_CENTER,
+            "basket_radius": BASKET_RADIUS,
+            "z_bounds": BASKET_Z_BOUNDS,
         },
     )
 
@@ -198,7 +247,7 @@ class TerminationsCfg:
 @configclass
 class BallBasketDpEnvCfg(ManagerBasedRLEnvCfg):
     # Scene settings
-    scene: BallBasketDpSceneCfg = BallBasketDpSceneCfg(num_envs=256, env_spacing=2.0)
+    scene: BallBasketDpSceneCfg = BallBasketDpSceneCfg(num_envs=128, env_spacing=2.5)
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
@@ -212,7 +261,7 @@ class BallBasketDpEnvCfg(ManagerBasedRLEnvCfg):
         """Post initialization."""
         # general settings
         self.decimation = 2
-        self.episode_length_s = 4
+        self.episode_length_s = 6
         # viewer settings
         self.viewer.eye = (2.0, -2.0, 1.5)
         self.viewer.lookat = (0.45, 0.0, 0.0)
