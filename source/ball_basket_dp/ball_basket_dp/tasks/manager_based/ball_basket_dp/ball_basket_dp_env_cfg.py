@@ -5,6 +5,7 @@
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
+from isaaclab.controllers import DifferentialIKControllerCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -102,11 +103,12 @@ class BallBasketDpSceneCfg(InteractiveSceneCfg):
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    arm_action = mdp.JointPositionActionCfg(
+    arm_action = mdp.DifferentialInverseKinematicsActionCfg(
         asset_name="robot",
+        body_name="panda_hand",
         joint_names=["panda_joint.*"],
-        scale=0.25,
-        use_default_offset=True,
+        scale=(0.04, 0.04, 0.04),
+        controller=DifferentialIKControllerCfg(command_type="position", use_relative_mode=True, ik_method="dls"),
     )
     gripper_action = mdp.BinaryJointPositionActionCfg(
         asset_name="robot",
