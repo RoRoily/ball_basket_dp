@@ -38,12 +38,29 @@ parser.add_argument(
     "--virtual_grasp",
     action="store_true",
     default=False,
-    help="Teleport the ball with the end-effector while grasped, then release it. Useful before contact grasping is tuned.",
+    help=(
+        "Teleport the ball with the end-effector while grasped, then release it. "
+        "Useful before contact grasping is tuned."
+    ),
 )
-parser.add_argument("--throw_time", type=float, default=0.55, help="Ballistic flight time used to compute throw velocity.")
+parser.add_argument(
+    "--throw_time", type=float, default=0.55, help="Ballistic flight time used to compute throw velocity."
+)
 parser.add_argument("--throw_speed_scale", type=float, default=1.0, help="Scale factor on computed throw velocity.")
 parser.add_argument("--grasp_distance", type=float, default=0.12, help="Maximum hand-ball distance for virtual attach.")
-parser.add_argument("--grasp_offset_z", type=float, default=-0.075, help="Ball offset from the hand while virtually grasped.")
+parser.add_argument(
+    "--grasp_offset_z", type=float, default=-0.075, help="Ball offset from the hand while virtually grasped."
+)
+parser.add_argument(
+    "--grasp_offset_x", type=float, default=0.0, help="End-effector x offset from ball center for grasp."
+)
+parser.add_argument(
+    "--grasp_offset_y", type=float, default=0.0, help="End-effector y offset from ball center for grasp."
+)
+parser.add_argument("--above_ball_z", type=float, default=0.28, help="Above-ball target z offset.")
+parser.add_argument("--descend_z", type=float, default=0.09, help="Descend target z offset.")
+parser.add_argument("--close_z", type=float, default=0.09, help="Close-gripper target z offset.")
+parser.add_argument("--lift_z", type=float, default=0.34, help="Lift target z offset.")
 parser.add_argument("--video", action="store_true", default=False, help="Record a video.")
 parser.add_argument("--video_dir", type=str, default="videos/scripted_expert", help="Directory for recorded videos.")
 AppLauncher.add_app_launcher_args(parser)
@@ -63,6 +80,7 @@ from isaaclab_tasks.utils import parse_env_cfg
 
 import ball_basket_dp.tasks  # noqa: F401
 from expert_policy import (  # noqa: E402
+    ExpertGraspTuning,
     carry_ball_with_hand,
     expert_action,
     grasp_candidate_mask,
@@ -97,6 +115,14 @@ def main():
     obs = env.reset()
     first_obs = policy_obs(obs)
     plan = plan_mode(first_obs, args_cli.mode, args_cli.reachable_xy_radius)
+    grasp_tuning = ExpertGraspTuning(
+        grasp_offset_x=args_cli.grasp_offset_x,
+        grasp_offset_y=args_cli.grasp_offset_y,
+        above_ball_z=args_cli.above_ball_z,
+        descend_z=args_cli.descend_z,
+        close_z=args_cli.close_z,
+        lift_z=args_cli.lift_z,
+    )
     print(f"[INFO]: Expert mode: {plan}")
     if args_cli.virtual_grasp:
         print("[INFO]: Conditional virtual grasp is enabled.")
@@ -131,7 +157,14 @@ def main():
             if args_cli.virtual_grasp and stage == "release_drop":
                 grasped[:] = False
 
-            actions = expert_action(obs_tensor, step, plan, args_cli.position_scale, args_cli.reachable_xy_radius)
+            actions = expert_action(
+                obs_tensor,
+                step,
+                plan,
+                args_cli.position_scale,
+                args_cli.reachable_xy_radius,
+                grasp_tuning,
+            )
             obs, _, terminated, truncated, _ = env.step(actions)
             terminated_count += int(terminated.sum().item())
             truncated_count += int(truncated.sum().item())

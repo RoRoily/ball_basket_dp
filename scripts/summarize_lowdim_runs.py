@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 
 
@@ -69,6 +70,22 @@ def _load_eval_metrics(run_dir: Path) -> dict:
     }
 
 
+def _parse_run_identity(run_dir: Path) -> dict:
+    config_path = run_dir / "run_config.json"
+    if config_path.exists():
+        with config_path.open("r", encoding="utf-8") as json_file:
+            config = json.load(json_file)
+        return {"demo_count": config.get("demo_count"), "seed": config.get("seed")}
+
+    text = str(run_dir)
+    demo_match = re.search(r"demos_(\d+)", text)
+    seed_match = re.search(r"seed_(\d+)", text)
+    return {
+        "demo_count": int(demo_match.group(1)) if demo_match else None,
+        "seed": int(seed_match.group(1)) if seed_match else None,
+    }
+
+
 def _format_float(value: float | None) -> str:
     return "-" if value is None else f"{value:.5f}"
 
@@ -109,17 +126,19 @@ def main() -> None:
 
     rows = []
     for run_dir in run_dirs:
+        identity = _parse_run_identity(run_dir)
         train_metrics = _load_training_metrics(run_dir / "metrics.csv")
         eval_metrics = _load_eval_metrics(run_dir)
         rows.append(
             {
                 "run": str(run_dir),
+                **identity,
                 **train_metrics,
                 **eval_metrics,
             }
         )
 
-    header = ["run", "epochs", "last_train", "last_val", "best_epoch", "best_metric", "success"]
+    header = ["run", "demos", "seed", "epochs", "last_train", "last_val", "best_epoch", "best_metric", "success"]
     print(" | ".join(header))
     print(" | ".join(["---"] * len(header)))
     for row in rows:
@@ -127,6 +146,8 @@ def main() -> None:
             " | ".join(
                 [
                     row["run"],
+                    str(row.get("demo_count", "-")),
+                    str(row.get("seed", "-")),
                     str(row.get("epochs", "-")),
                     _format_float(row.get("last_train_loss")),
                     _format_float(row.get("last_val_loss")),

@@ -98,6 +98,7 @@ def main() -> None:
         data_group = input_file["data"]
         obs = np.asarray(data_group["obs"], dtype=np.float32)
         actions = np.asarray(data_group["actions"], dtype=np.float32)
+        images = np.asarray(data_group["images"], dtype=np.uint8) if "images" in data_group else None
         success = np.asarray(data_group["success"], dtype=np.bool_)
         plans = _decode_strings(data_group["plan"][:])
         attach_count = np.asarray(data_group["attach_count"], dtype=np.int64)
@@ -135,21 +136,33 @@ def main() -> None:
 
     selected_obs = []
     selected_actions = []
+    selected_images = []
     selected_lengths = []
     for episode_index in selected_indices:
         start, end = ranges[episode_index]
         selected_obs.append(obs[start:end])
         selected_actions.append(actions[start:end])
+        if images is not None:
+            selected_images.append(images[start:end])
         selected_lengths.append(end - start)
 
     obs_data = np.concatenate(selected_obs, axis=0)
     action_data = np.concatenate(selected_actions, axis=0)
+    image_data = np.concatenate(selected_images, axis=0) if images is not None else None
     episode_lengths = np.asarray(selected_lengths, dtype=np.int64)
     new_episode_ends = np.cumsum(episode_lengths)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with h5py.File(args.output, "w") as output_file:
         data_group = output_file.create_group("data")
+        if image_data is not None:
+            data_group.create_dataset(
+                "images",
+                data=image_data,
+                compression="gzip",
+                compression_opts=4,
+                chunks=(1,) + tuple(image_data.shape[1:]),
+            )
         data_group.create_dataset("obs", data=obs_data, compression="gzip")
         data_group.create_dataset("actions", data=action_data, compression="gzip")
         data_group.create_dataset("success", data=success[selected_indices])
@@ -168,6 +181,11 @@ def main() -> None:
         meta_group.attrs["task"] = task
         meta_group.attrs["obs_dim"] = obs_data.shape[1]
         meta_group.attrs["action_dim"] = action_data.shape[1]
+        if image_data is not None:
+            meta_group.attrs["image_height"] = image_data.shape[1]
+            meta_group.attrs["image_width"] = image_data.shape[2]
+            meta_group.attrs["image_channels"] = image_data.shape[3]
+            meta_group.attrs["visual_input"] = True
         meta_group.attrs["source_dataset"] = os.path.abspath(args.input)
         meta_group.attrs["source_episodes"] = len(ranges)
         meta_group.attrs["selected_episodes"] = len(selected_indices)
@@ -183,6 +201,8 @@ def main() -> None:
     print(f"[INFO]: selected={len(selected_indices)}/{len(ranges)} episodes")
     print(f"[INFO]: rejected={len(ranges) - len(selected_indices)} reasons={reject_reasons}")
     print(f"[INFO]: obs shape={obs_data.shape}, action shape={action_data.shape}")
+    if image_data is not None:
+        print(f"[INFO]: image shape={image_data.shape}")
 
 
 if __name__ == "__main__":

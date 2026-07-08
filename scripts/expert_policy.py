@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 # Observation layout produced by BallBasket-LowDim-v0.
@@ -15,6 +17,24 @@ EE_VEL_SLICE = slice(25, 28)
 BALL_POS_SLICE = slice(28, 31)
 BALL_VEL_SLICE = slice(31, 34)
 BASKET_POS_SLICE = slice(34, 37)
+
+
+@dataclass(frozen=True)
+class ExpertGraspTuning:
+    """Geometry and height targets for scripted grasping.
+
+    Defaults match the original virtual-grasp scaffold. Physical contact grasp
+    experiments can tune these values without changing the environment.
+    """
+
+    grasp_offset_x: float = 0.0
+    grasp_offset_y: float = 0.0
+    above_ball_z: float = 0.28
+    descend_z: float = 0.09
+    close_z: float = 0.09
+    lift_z: float = 0.34
+    above_basket_z: float = 0.34
+    release_drop_z: float = 0.22
 
 
 def policy_obs(obs) -> torch.Tensor:
@@ -76,15 +96,26 @@ def throw_release_xy(basket_pos: torch.Tensor, reachable_xy_radius: float) -> to
 
 
 def target_for_stage(
-    stage: str, ball_pos: torch.Tensor, basket_pos: torch.Tensor, reachable_xy_radius: float
+    stage: str,
+    ball_pos: torch.Tensor,
+    basket_pos: torch.Tensor,
+    reachable_xy_radius: float,
+    grasp_tuning: ExpertGraspTuning | None = None,
 ) -> torch.Tensor:
     """End-effector target for the current stage in each environment frame."""
+    grasp_tuning = grasp_tuning or ExpertGraspTuning()
+    grasp_xy = torch.tensor(
+        (grasp_tuning.grasp_offset_x, grasp_tuning.grasp_offset_y, 0.0),
+        device=ball_pos.device,
+    )
     if stage == "above_ball":
-        return ball_pos + torch.tensor((0.0, 0.0, 0.28), device=ball_pos.device)
-    if stage in ("descend", "close"):
-        return ball_pos + torch.tensor((0.0, 0.0, 0.09), device=ball_pos.device)
+        return ball_pos + grasp_xy + torch.tensor((0.0, 0.0, grasp_tuning.above_ball_z), device=ball_pos.device)
+    if stage == "descend":
+        return ball_pos + grasp_xy + torch.tensor((0.0, 0.0, grasp_tuning.descend_z), device=ball_pos.device)
+    if stage == "close":
+        return ball_pos + grasp_xy + torch.tensor((0.0, 0.0, grasp_tuning.close_z), device=ball_pos.device)
     if stage == "lift":
-        return ball_pos + torch.tensor((0.0, 0.0, 0.34), device=ball_pos.device)
+        return ball_pos + grasp_xy + torch.tensor((0.0, 0.0, grasp_tuning.lift_z), device=ball_pos.device)
     if stage == "windup":
         direction = basket_direction(basket_pos)
         target = torch.zeros_like(ball_pos)
@@ -102,14 +133,19 @@ def target_for_stage(
         target[:, 2] = 0.24
         return target
     if stage == "above_basket":
-        return basket_pos + torch.tensor((0.0, 0.0, 0.34), device=basket_pos.device)
+        return basket_pos + torch.tensor((0.0, 0.0, grasp_tuning.above_basket_z), device=basket_pos.device)
     if stage == "release_drop":
-        return basket_pos + torch.tensor((0.0, 0.0, 0.22), device=basket_pos.device)
+        return basket_pos + torch.tensor((0.0, 0.0, grasp_tuning.release_drop_z), device=basket_pos.device)
     return basket_pos + torch.tensor((0.0, 0.0, 0.26), device=basket_pos.device)
 
 
 def expert_action(
-    obs: torch.Tensor, step: int, plan: str, position_scale: float, reachable_xy_radius: float
+    obs: torch.Tensor,
+    step: int,
+    plan: str,
+    position_scale: float,
+    reachable_xy_radius: float,
+    grasp_tuning: ExpertGraspTuning | None = None,
 ) -> torch.Tensor:
     """Compute dx/dy/dz + gripper action for the scripted expert."""
     stage = stage_at_step(step, plan)
@@ -117,7 +153,7 @@ def expert_action(
     ball_pos = obs[:, BALL_POS_SLICE]
     basket_pos = obs[:, BASKET_POS_SLICE]
 
-    target = target_for_stage(stage, ball_pos, basket_pos, reachable_xy_radius)
+    target = target_for_stage(stage, ball_pos, basket_pos, reachable_xy_radius, grasp_tuning)
     arm_cmd = torch.clamp((target - ee_pos) / position_scale, min=-1.0, max=1.0)
 
     gripper_cmd = torch.ones((obs.shape[0], 1), device=obs.device)

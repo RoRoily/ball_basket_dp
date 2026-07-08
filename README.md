@@ -139,8 +139,195 @@ Summarize training and evaluation runs:
 python scripts/summarize_lowdim_runs.py runs/lowdim_diffusion
 ```
 
+Run a repeatable data-scale experiment:
+
+```bash
+python scripts/run_lowdim_experiments.py \
+  --name scale_debug \
+  --demo_counts 5 \
+  --seeds 0 \
+  --epochs 10 \
+  --batch_size 128 \
+  --ema_decay 0.995 \
+  --num_envs_eval 4 \
+  --num_episodes_eval 2 \
+  --dry_run
+
+python scripts/run_lowdim_experiments.py \
+  --name scale_debug \
+  --demo_counts 5 \
+  --seeds 0 \
+  --epochs 10 \
+  --batch_size 128 \
+  --ema_decay 0.995 \
+  --num_envs_eval 4 \
+  --num_episodes_eval 2
+```
+
+Once the debug experiment works, compare multiple dataset sizes:
+
+```bash
+python scripts/run_lowdim_experiments.py \
+  --name scale_5_20_100 \
+  --demo_counts 5 20 100 \
+  --seeds 0 1 2 \
+  --epochs 100 \
+  --batch_size 256 \
+  --ema_decay 0.995 \
+  --num_envs_eval 8 \
+  --num_episodes_eval 5
+```
+
+This writes per-run configs, training CSVs, rollout JSON metrics, and plots:
+
+```bash
+python scripts/summarize_lowdim_runs.py runs/lowdim_diffusion/scale_5_20_100
+python scripts/plot_lowdim_results.py \
+  runs/lowdim_diffusion/scale_5_20_100 \
+  --output_dir runs/lowdim_diffusion/scale_5_20_100/plots
+```
+
 After the debug dataset works, collect more demonstrations by increasing
 `--num_demos` to 100 or more and train a fresh checkpoint.
+
+## Visual Diffusion Policy
+
+The first visual policy scaffold uses rendered RGB frames plus the existing
+low-dimensional proprio/context vector as diffusion conditions. This is not yet
+a pure image-only policy; it is the practical next step for validating the
+visual data, training, deployment, and video loop.
+
+Collect a tiny visual debug dataset:
+
+```bash
+python scripts/collect_visual_demos.py \
+  --task BallBasket-LowDim-v0 \
+  --num_demos 5 \
+  --steps 430 \
+  --image_size 96 \
+  --mode auto \
+  --virtual_grasp \
+  --output datasets/ball_basket_visual/debug_5.hdf5 \
+  --headless
+```
+
+Inspect the visual dataset:
+
+```bash
+python scripts/inspect_dataset.py datasets/ball_basket_visual/debug_5.hdf5
+```
+
+Expected visual-specific output includes:
+
+```text
+Image shape: (N, 96, 96, 3)
+Obs shape: (N, 43)
+Action shape: (N, 4)
+```
+
+Train a small visual diffusion policy:
+
+```bash
+python scripts/train_visual_diffusion.py \
+  --dataset datasets/ball_basket_visual/debug_5.hdf5 \
+  --epochs 10 \
+  --batch_size 32 \
+  --val_ratio 0.2 \
+  --device cuda \
+  --output runs/visual_diffusion/debug_5/policy.pt
+```
+
+The script writes:
+
+```text
+runs/visual_diffusion/debug_5/policy.pt
+runs/visual_diffusion/debug_5/best.pt
+runs/visual_diffusion/debug_5/metrics.csv
+```
+
+Deploy the visual checkpoint and record a rollout video:
+
+```bash
+python scripts/eval_visual_diffusion.py \
+  --task BallBasket-LowDim-v0 \
+  --checkpoint runs/visual_diffusion/debug_5/best.pt \
+  --num_envs 1 \
+  --num_episodes 1 \
+  --steps 430 \
+  --video \
+  --video_dir videos/visual_diffusion \
+  --metrics_path runs/visual_diffusion/debug_5/eval_metrics.json \
+  --headless
+```
+
+For a larger visual dataset, collect more successful demonstrations and train
+again:
+
+```bash
+python scripts/collect_visual_demos.py \
+  --task BallBasket-LowDim-v0 \
+  --num_demos 100 \
+  --steps 430 \
+  --image_size 96 \
+  --mode auto \
+  --virtual_grasp \
+  --keep_success_only \
+  --min_attach_count 1 \
+  --max_demos_attempts 500 \
+  --output datasets/ball_basket_visual/train_success_100.hdf5 \
+  --headless
+```
+
+Use `--image_only` with `train_visual_diffusion.py` only after the RGB +
+low-dimensional version is stable.
+
+## Physical Grasp Calibration
+
+The virtual grasp pipeline is useful as a baseline, but physical grasping should
+be calibrated separately with teleporting disabled. Sweep grasp heights and
+offsets first:
+
+```bash
+python scripts/physical_grasp_eval.py \
+  --task BallBasket-LowDim-v0 \
+  --num_envs 8 \
+  --trials 2 \
+  --steps 260 \
+  --descend_zs 0.06 0.075 0.09 \
+  --close_zs 0.06 0.075 0.09 \
+  --lift_zs 0.30 0.34 \
+  --xy_offsets 0.0,0.0 0.02,0.0 -0.02,0.0 0.0,0.02 0.0,-0.02 \
+  --output_dir runs/physical_grasp/sweep_debug \
+  --headless
+```
+
+The script writes:
+
+```text
+runs/physical_grasp/sweep_debug/physical_grasp_metrics.csv
+runs/physical_grasp/sweep_debug/physical_grasp_summary.json
+```
+
+Use the best row from the summary to record a no-virtual-grasp video:
+
+```bash
+python scripts/scripted_expert.py \
+  --task BallBasket-LowDim-v0 \
+  --num_envs 1 \
+  --steps 260 \
+  --mode drop \
+  --grasp_offset_x 0.0 \
+  --grasp_offset_y 0.0 \
+  --descend_z 0.075 \
+  --close_z 0.075 \
+  --lift_z 0.34 \
+  --video \
+  --video_dir videos/physical_grasp \
+  --headless
+```
+
+Only after lift/hold success is reasonable should you try collecting demos
+without `--virtual_grasp`.
 
 ## Installation
 

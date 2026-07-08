@@ -72,6 +72,7 @@ def main() -> None:
         data_group = h5_file["data"]
         obs = np.asarray(data_group["obs"])
         actions = np.asarray(data_group["actions"])
+        image_shape = tuple(data_group["images"].shape) if "images" in data_group else None
         success = np.asarray(data_group["success"], dtype=np.bool_)
         episode_ends = np.asarray(h5_file["meta/episode_ends"], dtype=np.int64)
         plans = [plan.decode("utf-8") if isinstance(plan, bytes) else str(plan) for plan in data_group["plan"][:]]
@@ -93,6 +94,8 @@ def main() -> None:
     print(f"Transitions: {obs.shape[0]}")
     print(f"Obs shape: {obs.shape}")
     print(f"Action shape: {actions.shape}")
+    if image_shape is not None:
+        print(f"Image shape: {image_shape}")
     print(
         "Episode length min/mean/max: "
         f"{episode_lengths.min()} / {episode_lengths.mean():.1f} / {episode_lengths.max()}"

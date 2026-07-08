@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Train a small low-dimensional diffusion policy from collected demonstrations."""
+"""Train an RGB image-conditioned diffusion policy from visual demonstrations."""
 
 from __future__ import annotations
 
@@ -16,19 +16,17 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from lowdim_diffusion import (
-    DDPMScheduler,
-    LowDimSequenceDataset,
-    build_model_from_config,
-    checkpoint_config_from_args,
-    resolve_torch_device,
-    set_seed,
+from lowdim_diffusion import DDPMScheduler, resolve_torch_device, set_seed
+from visual_diffusion import (
+    VisualSequenceDataset,
+    build_visual_model_from_config,
+    visual_checkpoint_config_from_args,
 )
 
 
 def _default_output_path() -> str:
     run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    return os.path.join("runs", "lowdim_diffusion", run_name, "policy.pt")
+    return os.path.join("runs", "visual_diffusion", run_name, "policy.pt")
 
 
 def _save_checkpoint(
@@ -94,7 +92,7 @@ class EMAModel:
 
 
 def _split_episode_indices(num_episodes: int, val_ratio: float, seed: int) -> tuple[list[int], list[int]]:
-    """Split full episodes into train and validation sets."""
+    """Split complete episodes into train and validation sets."""
     all_indices = list(range(num_episodes))
     if val_ratio <= 0.0 or num_episodes < 2:
         return all_indices, []
@@ -114,8 +112,10 @@ def _diffusion_loss(
     scheduler: DDPMScheduler,
     device: torch.device,
     num_diffusion_steps: int,
+    use_lowdim_obs: bool,
 ) -> tuple[torch.Tensor, int]:
-    obs = batch["obs"].to(device, non_blocking=True)
+    image_cond = batch["images"].to(device, non_blocking=True)
+    obs_cond = batch["obs"].to(device, non_blocking=True) if use_lowdim_obs else None
     clean_actions = batch["actions"].to(device, non_blocking=True)
     noise = torch.randn_like(clean_actions)
     timesteps = torch.randint(
@@ -126,7 +126,7 @@ def _diffusion_loss(
         dtype=torch.long,
     )
     noisy_actions = scheduler.add_noise(clean_actions, noise, timesteps)
-    noise_pred = model(noisy_actions, timesteps, obs)
+    noise_pred = model(noisy_actions, timesteps, image_cond, obs_cond)
     return F.mse_loss(noise_pred, noise), clean_actions.shape[0]
 
 
@@ -139,13 +139,14 @@ def _train_one_epoch(
     num_diffusion_steps: int,
     grad_clip: float,
     ema_model: EMAModel | None,
+    use_lowdim_obs: bool,
 ) -> float:
     model.train()
     total_loss = 0.0
     total_samples = 0
 
     for batch in dataloader:
-        loss, batch_size = _diffusion_loss(batch, model, scheduler, device, num_diffusion_steps)
+        loss, batch_size = _diffusion_loss(batch, model, scheduler, device, num_diffusion_steps, use_lowdim_obs)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if grad_clip > 0.0:
@@ -166,33 +167,36 @@ def _evaluate_loss(
     scheduler: DDPMScheduler,
     device: torch.device,
     num_diffusion_steps: int,
+    use_lowdim_obs: bool,
 ) -> float:
     model.eval()
     total_loss = 0.0
     total_samples = 0
     for batch in dataloader:
-        loss, batch_size = _diffusion_loss(batch, model, scheduler, device, num_diffusion_steps)
+        loss, batch_size = _diffusion_loss(batch, model, scheduler, device, num_diffusion_steps, use_lowdim_obs)
         total_loss += float(loss.item()) * batch_size
         total_samples += batch_size
     return total_loss / max(total_samples, 1)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train a low-dimensional diffusion policy.")
-    parser.add_argument("--dataset", type=str, required=True, help="HDF5 dataset produced by scripts/collect_demos.py.")
-    parser.add_argument("--output", type=str, default=None, help="Checkpoint path. Defaults to runs/lowdim_diffusion/...")
+    parser = argparse.ArgumentParser(description="Train a visual diffusion policy.")
+    parser.add_argument("--dataset", type=str, required=True, help="HDF5 dataset from collect_visual_demos.py.")
+    parser.add_argument("--output", type=str, default=None, help="Checkpoint path. Defaults to runs/visual_diffusion/...")
     parser.add_argument("--device", type=str, default="auto", help="Torch device, for example auto, cuda, cuda:0, cpu.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs.")
-    parser.add_argument("--batch_size", type=int, default=256, help="Training batch size.")
+    parser.add_argument("--batch_size", type=int, default=64, help="Training batch size.")
     parser.add_argument("--val_ratio", type=float, default=0.1, help="Fraction of episodes used for validation.")
     parser.add_argument("--lr", type=float, default=1.0e-4, help="Learning rate.")
     parser.add_argument("--weight_decay", type=float, default=1.0e-6, help="AdamW weight decay.")
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers.")
-    parser.add_argument("--obs_horizon", type=int, default=2, help="Number of observation steps used as condition.")
+    parser.add_argument("--cache_images", action="store_true", default=False, help="Load all uint8 images into RAM.")
+    parser.add_argument("--obs_horizon", type=int, default=2, help="Number of visual/obs steps used as condition.")
     parser.add_argument("--pred_horizon", type=int, default=16, help="Number of future actions predicted by diffusion.")
-    parser.add_argument("--action_horizon", type=int, default=8, help="Number of sampled actions to execute before replanning.")
-    parser.add_argument("--hidden_dim", type=int, default=256, help="Denoising MLP hidden dimension.")
+    parser.add_argument("--action_horizon", type=int, default=8, help="Number of sampled actions executed before replanning.")
+    parser.add_argument("--image_feature_dim", type=int, default=128, help="CNN feature dimension per image.")
+    parser.add_argument("--hidden_dim", type=int, default=512, help="Denoising MLP hidden dimension.")
     parser.add_argument("--num_layers", type=int, default=4, help="Denoising MLP hidden layers.")
     parser.add_argument("--time_embed_dim", type=int, default=64, help="Diffusion timestep embedding dimension.")
     parser.add_argument("--num_diffusion_steps", type=int, default=100, help="DDPM diffusion steps.")
@@ -202,7 +206,9 @@ def main() -> None:
     parser.add_argument("--save_every", type=int, default=25, help="Save an intermediate checkpoint every N epochs.")
     parser.add_argument("--log_csv", type=str, default=None, help="CSV path for train/validation loss.")
     parser.add_argument("--ema_decay", type=float, default=0.995, help="EMA decay for checkpoint weights. 0 disables EMA.")
+    parser.add_argument("--image_only", action="store_true", default=False, help="Do not condition on low-dimensional obs.")
     args = parser.parse_args()
+    args.use_lowdim_obs = not args.image_only
 
     if args.action_horizon > args.pred_horizon:
         raise ValueError("action_horizon must be <= pred_horizon.")
@@ -215,28 +221,31 @@ def main() -> None:
     device = resolve_torch_device(args.device)
     output_path = args.output or _default_output_path()
 
-    source_dataset = LowDimSequenceDataset(
+    source_dataset = VisualSequenceDataset(
         dataset_path=args.dataset,
         obs_horizon=args.obs_horizon,
         pred_horizon=args.pred_horizon,
+        cache_images=False,
     )
     train_episode_indices, val_episode_indices = _split_episode_indices(
         source_dataset.num_episodes, args.val_ratio, args.seed
     )
-    train_dataset = LowDimSequenceDataset(
+    train_dataset = VisualSequenceDataset(
         dataset_path=args.dataset,
         obs_horizon=args.obs_horizon,
         pred_horizon=args.pred_horizon,
         episode_indices=train_episode_indices,
+        cache_images=args.cache_images,
     )
     val_dataset = None
     if val_episode_indices:
-        val_dataset = LowDimSequenceDataset(
+        val_dataset = VisualSequenceDataset(
             dataset_path=args.dataset,
             obs_horizon=args.obs_horizon,
             pred_horizon=args.pred_horizon,
             episode_indices=val_episode_indices,
             normalizer=train_dataset.normalizer,
+            cache_images=args.cache_images,
         )
 
     train_loader = DataLoader(
@@ -258,11 +267,11 @@ def main() -> None:
             drop_last=False,
         )
 
-    config = checkpoint_config_from_args(args, source_dataset.obs_dim, source_dataset.action_dim)
+    config = visual_checkpoint_config_from_args(args, source_dataset)
     config["train_episode_indices"] = train_episode_indices
     config["val_episode_indices"] = val_episode_indices
-    model = build_model_from_config(config).to(device)
     config["ema_decay"] = float(args.ema_decay)
+    model = build_visual_model_from_config(config).to(device)
     scheduler = DDPMScheduler(
         num_train_timesteps=args.num_diffusion_steps,
         beta_start=args.beta_start,
@@ -275,14 +284,15 @@ def main() -> None:
     print(f"[INFO]: dataset={os.path.abspath(args.dataset)}")
     print(
         f"[INFO]: episodes={source_dataset.num_episodes}, windows={len(source_dataset)}, "
-        f"obs_dim={source_dataset.obs_dim}, action_dim={source_dataset.action_dim}"
+        f"image_shape={source_dataset.image_shape}, obs_dim={source_dataset.obs_dim}, "
+        f"action_dim={source_dataset.action_dim}"
     )
     print(
         f"[INFO]: train_episodes={len(train_episode_indices)}, val_episodes={len(val_episode_indices)}, "
         f"train_windows={len(train_dataset)}, val_windows={len(val_dataset) if val_dataset is not None else 0}"
     )
     print(f"[INFO]: device={device}, output={os.path.abspath(output_path)}")
-    print(f"[INFO]: ema_decay={args.ema_decay}")
+    print(f"[INFO]: use_lowdim_obs={args.use_lowdim_obs}, ema_decay={args.ema_decay}")
 
     best_loss = float("inf")
     best_path = os.path.join(os.path.dirname(output_path), "best.pt")
@@ -292,6 +302,8 @@ def main() -> None:
         writer = csv.DictWriter(csv_file, fieldnames=["epoch", "train_loss", "val_loss", "best_metric"])
         writer.writeheader()
 
+    train_loss = float("inf")
+    val_loss = None
     for epoch in range(1, args.epochs + 1):
         train_loss = _train_one_epoch(
             train_loader,
@@ -302,13 +314,16 @@ def main() -> None:
             args.num_diffusion_steps,
             args.grad_clip,
             ema_model,
+            args.use_lowdim_obs,
         )
         val_loss = None
         eval_backup = None
         if ema_model is not None:
             eval_backup = ema_model.apply_to(model)
         if val_loader is not None:
-            val_loss = _evaluate_loss(val_loader, model, scheduler, device, args.num_diffusion_steps)
+            val_loss = _evaluate_loss(
+                val_loader, model, scheduler, device, args.num_diffusion_steps, args.use_lowdim_obs
+            )
         if ema_model is not None and eval_backup is not None:
             ema_model.restore(model, eval_backup)
         best_metric = val_loss if val_loss is not None else train_loss
@@ -341,6 +356,10 @@ def main() -> None:
     print(f"[INFO]: saved final checkpoint: {os.path.abspath(output_path)}")
     print(f"[INFO]: saved best checkpoint: {os.path.abspath(best_path)}")
     print(f"[INFO]: saved metrics CSV: {os.path.abspath(log_csv)}")
+    source_dataset.close()
+    train_dataset.close()
+    if val_dataset is not None:
+        val_dataset.close()
 
 
 if __name__ == "__main__":
