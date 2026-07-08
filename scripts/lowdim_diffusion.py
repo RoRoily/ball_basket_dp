@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 import h5py
 import numpy as np
@@ -84,7 +84,14 @@ class LowDimSequenceDataset(Dataset):
     Windows are padded by repeating boundary samples inside each episode.
     """
 
-    def __init__(self, dataset_path: str, obs_horizon: int, pred_horizon: int):
+    def __init__(
+        self,
+        dataset_path: str,
+        obs_horizon: int,
+        pred_horizon: int,
+        episode_indices: Sequence[int] | None = None,
+        normalizer: dict[str, Any] | None = None,
+    ):
         super().__init__()
         if obs_horizon < 1:
             raise ValueError("obs_horizon must be >= 1.")
@@ -109,16 +116,52 @@ class LowDimSequenceDataset(Dataset):
 
         self.obs_horizon = obs_horizon
         self.pred_horizon = pred_horizon
-        self.normalizer = compute_normalizer(self.obs, self.actions)
-        self.indices: list[tuple[int, int, int]] = []
-
+        self.episode_ranges: list[tuple[int, int]] = []
         episode_start = 0
         for episode_end in self.episode_ends:
             if episode_end <= episode_start:
                 raise ValueError("episode_ends must be strictly increasing.")
-            for step in range(episode_start, int(episode_end)):
-                self.indices.append((episode_start, int(episode_end), step))
+            self.episode_ranges.append((episode_start, int(episode_end)))
             episode_start = int(episode_end)
+
+        if episode_indices is None:
+            self.episode_indices = list(range(len(self.episode_ranges)))
+        else:
+            self.episode_indices = [int(index) for index in episode_indices]
+            if len(self.episode_indices) == 0:
+                raise ValueError("episode_indices must not be empty.")
+            invalid_indices = [
+                index for index in self.episode_indices if index < 0 or index >= len(self.episode_ranges)
+            ]
+            if invalid_indices:
+                raise ValueError(f"Invalid episode indices: {invalid_indices}.")
+
+        self.indices: list[tuple[int, int, int]] = []
+
+        selected_transition_indices = []
+        for episode_index in self.episode_indices:
+            episode_start, episode_end = self.episode_ranges[episode_index]
+            selected_transition_indices.extend(range(episode_start, episode_end))
+            for step in range(episode_start, episode_end):
+                self.indices.append((episode_start, int(episode_end), step))
+
+        if normalizer is None:
+            selected_transition_indices = np.asarray(selected_transition_indices, dtype=np.int64)
+            self.normalizer = compute_normalizer(
+                self.obs[selected_transition_indices], self.actions[selected_transition_indices]
+            )
+        else:
+            self.normalizer = {key: torch.as_tensor(value, dtype=torch.float32) for key, value in normalizer.items()}
+
+    @property
+    def num_episodes(self) -> int:
+        """Number of episodes in the source dataset."""
+        return len(self.episode_ranges)
+
+    @property
+    def num_selected_episodes(self) -> int:
+        """Number of episodes used by this dataset view."""
+        return len(self.episode_indices)
 
     @property
     def obs_dim(self) -> int:
@@ -295,6 +338,7 @@ def checkpoint_config_from_args(args: Any, obs_dim: int, action_dim: int) -> dic
         "num_diffusion_steps": int(args.num_diffusion_steps),
         "beta_start": float(args.beta_start),
         "beta_end": float(args.beta_end),
+        "val_ratio": float(getattr(args, "val_ratio", 0.0)),
     }
 
 

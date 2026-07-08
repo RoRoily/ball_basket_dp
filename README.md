@@ -55,21 +55,53 @@ python scripts/train_lowdim_diffusion.py \
   --dataset datasets/ball_basket_lowdim/debug_5.hdf5 \
   --epochs 100 \
   --batch_size 256 \
+  --val_ratio 0.1 \
   --device cuda \
   --output runs/lowdim_diffusion/debug_5/policy.pt
 ```
 
-Deploy the checkpoint and record a validation video:
+The training script writes checkpoints and a CSV loss log:
+
+```bash
+ls -lh runs/lowdim_diffusion/debug_5/
+tail -n 5 runs/lowdim_diffusion/debug_5/metrics.csv
+```
+
+Validation is split by complete demonstration episodes, and normalization
+statistics are estimated from the training episodes only.
+
+Deploy the checkpoint and record a validation video plus rollout metrics:
 
 ```bash
 python scripts/eval_lowdim_diffusion.py \
   --task BallBasket-LowDim-v0 \
   --checkpoint runs/lowdim_diffusion/debug_5/best.pt \
   --num_envs 1 \
+  --num_episodes 1 \
   --steps 430 \
   --video \
   --video_dir videos/lowdim_diffusion \
+  --metrics_path runs/lowdim_diffusion/debug_5/eval_metrics.json \
   --headless
+```
+
+For a quantitative check without recording video, evaluate more rollouts:
+
+```bash
+python scripts/eval_lowdim_diffusion.py \
+  --task BallBasket-LowDim-v0 \
+  --checkpoint runs/lowdim_diffusion/debug_5/best.pt \
+  --num_envs 8 \
+  --num_episodes 5 \
+  --steps 430 \
+  --metrics_path runs/lowdim_diffusion/debug_5/eval_40_rollouts.json \
+  --headless
+```
+
+Summarize training and evaluation runs:
+
+```bash
+python scripts/summarize_lowdim_runs.py runs/lowdim_diffusion
 ```
 
 After the debug dataset works, collect more demonstrations by increasing
