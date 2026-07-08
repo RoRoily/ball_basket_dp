@@ -42,6 +42,41 @@ python scripts/collect_demos.py \
   --headless
 ```
 
+For larger runs, collect raw demonstrations first, then filter them:
+
+```bash
+python scripts/collect_demos.py \
+  --task BallBasket-LowDim-v0 \
+  --num_demos 100 \
+  --steps 430 \
+  --mode auto \
+  --virtual_grasp \
+  --output datasets/ball_basket_lowdim/raw_100.hdf5 \
+  --headless
+
+python scripts/filter_dataset.py \
+  --input datasets/ball_basket_lowdim/raw_100.hdf5 \
+  --output datasets/ball_basket_lowdim/train_success_100.hdf5 \
+  --keep_success_only \
+  --min_attach_count 1
+```
+
+You can also filter while collecting:
+
+```bash
+python scripts/collect_demos.py \
+  --task BallBasket-LowDim-v0 \
+  --num_demos 100 \
+  --steps 430 \
+  --mode auto \
+  --virtual_grasp \
+  --keep_success_only \
+  --min_attach_count 1 \
+  --max_demos_attempts 500 \
+  --output datasets/ball_basket_lowdim/train_success_100.hdf5 \
+  --headless
+```
+
 Inspect the dataset before training:
 
 ```bash
