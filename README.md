@@ -12,6 +12,69 @@ It allows you to develop in an isolated environment, outside of the core Isaac L
 
 **Keywords:** extension, template, isaaclab
 
+## Ball Basket Low-Dimensional Pipeline
+
+This project contains a first low-dimensional pipeline for `BallBasket-LowDim-v0`:
+
+1. run the Isaac Lab environment;
+2. collect scripted expert demonstrations into HDF5;
+3. train a small DDPM-style low-dimensional diffusion policy;
+4. deploy the checkpoint back into Isaac Lab and record a validation video.
+
+On the server, start from the project root:
+
+```bash
+cd $HDD_BASE/workspace/ball_basket_dp
+conda activate isaaclab
+pip install -e source/ball_basket_dp
+```
+
+Collect a tiny debug dataset first:
+
+```bash
+python scripts/collect_demos.py \
+  --task BallBasket-LowDim-v0 \
+  --num_demos 5 \
+  --steps 430 \
+  --mode auto \
+  --virtual_grasp \
+  --output datasets/ball_basket_lowdim/debug_5.hdf5 \
+  --headless
+```
+
+Inspect the dataset before training:
+
+```bash
+python scripts/inspect_dataset.py datasets/ball_basket_lowdim/debug_5.hdf5
+```
+
+Train the low-dimensional diffusion policy:
+
+```bash
+python scripts/train_lowdim_diffusion.py \
+  --dataset datasets/ball_basket_lowdim/debug_5.hdf5 \
+  --epochs 100 \
+  --batch_size 256 \
+  --device cuda \
+  --output runs/lowdim_diffusion/debug_5/policy.pt
+```
+
+Deploy the checkpoint and record a validation video:
+
+```bash
+python scripts/eval_lowdim_diffusion.py \
+  --task BallBasket-LowDim-v0 \
+  --checkpoint runs/lowdim_diffusion/debug_5/best.pt \
+  --num_envs 1 \
+  --steps 430 \
+  --video \
+  --video_dir videos/lowdim_diffusion \
+  --headless
+```
+
+After the debug dataset works, collect more demonstrations by increasing
+`--num_demos` to 100 or more and train a fresh checkpoint.
+
 ## Installation
 
 - Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
