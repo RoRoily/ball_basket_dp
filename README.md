@@ -217,6 +217,16 @@ Inspect the visual dataset:
 python scripts/inspect_dataset.py datasets/ball_basket_visual/debug_5.hdf5
 ```
 
+Preview a few visual episodes before training:
+
+```bash
+python scripts/preview_visual_dataset.py \
+  datasets/ball_basket_visual/debug_5.hdf5 \
+  --output_dir datasets/ball_basket_visual/debug_5_preview \
+  --num_episodes 3 \
+  --gif
+```
+
 Expected visual-specific output includes:
 
 ```text
@@ -280,6 +290,65 @@ python scripts/collect_visual_demos.py \
 
 Use `--image_only` with `train_visual_diffusion.py` only after the RGB +
 low-dimensional version is stable.
+
+Run a repeatable visual experiment with preview, training, eval metrics, and
+plots:
+
+```bash
+python scripts/run_visual_experiments.py \
+  --name visual_debug \
+  --demo_counts 5 \
+  --image_sizes 96 \
+  --conditions rgb_lowdim \
+  --seeds 0 \
+  --epochs 10 \
+  --batch_size 32 \
+  --num_episodes_eval 2 \
+  --dry_run
+
+python scripts/run_visual_experiments.py \
+  --name visual_debug \
+  --demo_counts 5 \
+  --image_sizes 96 \
+  --conditions rgb_lowdim \
+  --seeds 0 \
+  --epochs 10 \
+  --batch_size 32 \
+  --num_episodes_eval 2
+```
+
+Compare visual + low-dimensional conditioning against image-only conditioning:
+
+```bash
+python scripts/run_visual_experiments.py \
+  --name visual_ablation_5_20_100 \
+  --demo_counts 5 20 100 \
+  --image_sizes 96 \
+  --conditions all \
+  --seeds 0 1 2 \
+  --epochs 100 \
+  --batch_size 64 \
+  --num_episodes_eval 5
+```
+
+Regenerate visual experiment summaries and plots:
+
+```bash
+python scripts/plot_visual_results.py \
+  runs/visual_diffusion/visual_ablation_5_20_100 \
+  --output_dir runs/visual_diffusion/visual_ablation_5_20_100/plots
+```
+
+The visual experiment tools write:
+
+```text
+datasets/ball_basket_visual/experiments/<name>/image_<size>/
+runs/visual_diffusion/<name>/image_<size>/<condition>/demos_<N>/seed_<S>/
+runs/visual_diffusion/<name>/plots/summary.csv
+runs/visual_diffusion/<name>/plots/aggregate.csv
+runs/visual_diffusion/<name>/plots/success_vs_demos.png
+runs/visual_diffusion/<name>/plots/loss_curves.png
+```
 
 ## Physical Grasp Calibration
 
