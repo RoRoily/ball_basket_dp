@@ -386,7 +386,7 @@ def build_visual_model_from_config(config: dict[str, Any]) -> VisualDenoisingMLP
 
 def prepare_eval_frame(frame: np.ndarray, image_size: int, device: torch.device) -> torch.Tensor:
     """Resize and convert one rendered frame to a model input tensor."""
-    frame = resize_rgb_image(frame, image_size)
+    frame = resize_rgb_image(frame, image_size).copy()
     return torch.as_tensor(frame, dtype=torch.float32, device=device).permute(2, 0, 1) / 255.0
 
 
