@@ -203,6 +203,12 @@ def main() -> None:
                 ]
                 + _bool_flag(args.virtual_grasp, "--virtual_grasp")
             )
+            if args.keep_success_only:
+                collect_cmd.append("--keep_success_only")
+            if args.min_attach_count > 0:
+                collect_cmd += ["--min_attach_count", str(args.min_attach_count)]
+            if args.max_final_distance >= 0.0:
+                collect_cmd += ["--max_final_distance", str(args.max_final_distance)]
             _maybe_run(collect_cmd, raw_dataset, args.skip_existing, args.dry_run)
 
         if "inspect" in stages:
