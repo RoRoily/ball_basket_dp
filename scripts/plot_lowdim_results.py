@@ -15,6 +15,22 @@ from collections import defaultdict
 from pathlib import Path
 
 
+DIAGNOSTIC_METRICS = [
+    "mean_initial_ball_to_basket_distance",
+    "mean_final_ball_to_basket_distance",
+    "mean_min_ball_to_basket_distance",
+    "mean_ball_to_basket_improvement",
+    "mean_initial_ee_to_ball_distance",
+    "mean_final_ee_to_ball_distance",
+    "mean_min_ee_to_ball_distance",
+    "mean_max_ball_height",
+    "mean_ball_height_gain",
+    "ever_close_to_ball_rate",
+    "ever_close_to_basket_rate",
+    "ever_lifted_ball_rate",
+]
+
+
 def _float_or_none(value) -> float | None:
     if value is None or value == "":
         return None
@@ -98,6 +114,8 @@ def _summarize_run(run_dir: Path) -> tuple[dict, list[dict]]:
         "success_count": eval_metrics.get("success_count"),
         "total_rollouts": eval_metrics.get("total_rollouts"),
     }
+    for metric_name in DIAGNOSTIC_METRICS:
+        summary[metric_name] = eval_metrics.get(metric_name)
     return summary, training_rows
 
 
@@ -137,16 +155,20 @@ def _aggregate(rows: list[dict]) -> list[dict]:
         best_values = [float(row["best_metric"]) for row in group if row.get("best_metric") is not None]
         success_mean, success_std = _mean_std(success_values)
         best_mean, best_std = _mean_std(best_values)
-        aggregate_rows.append(
-            {
-                "demo_count": demo_count,
-                "num_seeds": len(group),
-                "success_rate_mean": success_mean,
-                "success_rate_std": success_std,
-                "best_metric_mean": best_mean,
-                "best_metric_std": best_std,
-            }
-        )
+        aggregate_row = {
+            "demo_count": demo_count,
+            "num_seeds": len(group),
+            "success_rate_mean": success_mean,
+            "success_rate_std": success_std,
+            "best_metric_mean": best_mean,
+            "best_metric_std": best_std,
+        }
+        for metric_name in DIAGNOSTIC_METRICS:
+            values = [float(row[metric_name]) for row in group if row.get(metric_name) is not None]
+            metric_mean, metric_std = _mean_std(values)
+            aggregate_row[f"{metric_name}_mean"] = metric_mean
+            aggregate_row[f"{metric_name}_std"] = metric_std
+        aggregate_rows.append(aggregate_row)
     return aggregate_rows
 
 
@@ -175,6 +197,35 @@ def _plot(rows: list[dict], training_by_run: dict[str, list[dict]], output_dir: 
         plt.tight_layout()
         plt.savefig(output_dir / "success_vs_demos.png", dpi=160)
         plt.close()
+
+    diagnostic_specs = [
+        ("mean_min_ee_to_ball_distance", "Min hand-ball distance"),
+        ("mean_final_ball_to_basket_distance", "Final ball-basket distance"),
+        ("ever_close_to_ball_rate", "Ever close to ball rate"),
+        ("ever_lifted_ball_rate", "Ever lifted ball rate"),
+    ]
+    if aggregate_rows:
+        fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+        plotted_any = False
+        for axis, (metric_name, title) in zip(axes.reshape(-1), diagnostic_specs):
+            rows_with_metric = [
+                row for row in aggregate_rows if row.get(f"{metric_name}_mean") is not None
+            ]
+            if not rows_with_metric:
+                axis.set_visible(False)
+                continue
+            xs = [row["demo_count"] for row in rows_with_metric]
+            means = [row[f"{metric_name}_mean"] for row in rows_with_metric]
+            stds = [row[f"{metric_name}_std"] for row in rows_with_metric]
+            axis.errorbar(xs, means, yerr=stds, marker="o", capsize=4)
+            axis.set_title(title)
+            axis.set_xlabel("Number of demonstrations")
+            axis.grid(True, alpha=0.3)
+            plotted_any = True
+        if plotted_any:
+            fig.tight_layout()
+            fig.savefig(output_dir / "diagnostics_vs_demos.png", dpi=160)
+        plt.close(fig)
 
     plt.figure(figsize=(8, 5))
     plotted = False
@@ -239,6 +290,8 @@ def main() -> None:
         print(f"[INFO]: wrote aggregate: {output_dir / 'aggregate.csv'}")
     if (output_dir / "success_vs_demos.png").exists():
         print(f"[INFO]: wrote plot: {output_dir / 'success_vs_demos.png'}")
+    if (output_dir / "diagnostics_vs_demos.png").exists():
+        print(f"[INFO]: wrote plot: {output_dir / 'diagnostics_vs_demos.png'}")
     if (output_dir / "loss_curves.png").exists():
         print(f"[INFO]: wrote plot: {output_dir / 'loss_curves.png'}")
 

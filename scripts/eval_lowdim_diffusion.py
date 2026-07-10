@@ -26,6 +26,24 @@ parser.add_argument("--num_episodes", type=int, default=1, help="Number of vecto
 parser.add_argument("--steps", type=int, default=430, help="Maximum environment steps.")
 parser.add_argument("--action_clip", type=float, default=1.0, help="Clamp deployed actions to [-clip, clip].")
 parser.add_argument("--sample_clip", type=float, default=2.0, help="Clamp normalized samples during DDPM reverse steps.")
+parser.add_argument(
+    "--close_to_ball_threshold",
+    type=float,
+    default=0.12,
+    help="Distance threshold for the diagnostic ever_close_to_ball metric.",
+)
+parser.add_argument(
+    "--close_to_basket_threshold",
+    type=float,
+    default=0.25,
+    help="Distance threshold for the diagnostic ever_close_to_basket metric.",
+)
+parser.add_argument(
+    "--lift_height_threshold",
+    type=float,
+    default=0.05,
+    help="Height above initial ball z for the diagnostic ever_lifted_ball metric.",
+)
 parser.add_argument("--video", action="store_true", default=False, help="Record a video.")
 parser.add_argument("--video_dir", type=str, default="videos/lowdim_diffusion", help="Directory for recorded videos.")
 parser.add_argument("--metrics_path", type=str, default=None, help="Path to write rollout metrics JSON.")
@@ -53,7 +71,7 @@ from lowdim_diffusion import (  # noqa: E402
     sample_action_sequences,
     unnormalize_actions,
 )
-from expert_policy import policy_obs  # noqa: E402
+from expert_policy import BALL_POS_SLICE, BASKET_POS_SLICE, EE_POS_SLICE, policy_obs  # noqa: E402
 
 
 def _torch_load(path: str, map_location: torch.device) -> dict:
@@ -86,6 +104,41 @@ def _json_scalar(value):
     if hasattr(value, "item"):
         return value.item()
     return value
+
+
+def _state_distances(obs_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return hand-ball distance, ball-basket distance, and ball height."""
+    ee_pos = obs_tensor[:, EE_POS_SLICE]
+    ball_pos = obs_tensor[:, BALL_POS_SLICE]
+    basket_pos = obs_tensor[:, BASKET_POS_SLICE]
+    ee_to_ball = torch.linalg.norm(ee_pos - ball_pos, dim=1)
+    ball_to_basket = torch.linalg.norm(ball_pos - basket_pos, dim=1)
+    ball_height = ball_pos[:, 2]
+    return ee_to_ball, ball_to_basket, ball_height
+
+
+def _extend_metric_list(target: list[float], values: torch.Tensor) -> None:
+    """Append a vector tensor as Python floats."""
+    target.extend(float(value) for value in values.detach().cpu().tolist())
+
+
+def _extend_bool_metric_list(target: list[bool], values: torch.Tensor) -> None:
+    """Append a boolean vector tensor as Python bools."""
+    target.extend(bool(value) for value in values.detach().cpu().tolist())
+
+
+def _mean(values: list[float]) -> float | None:
+    """Return the mean of a possibly empty float list."""
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _fraction(values: list[bool]) -> float | None:
+    """Return the fraction of true values in a possibly empty bool list."""
+    if not values:
+        return None
+    return sum(1 for value in values if value) / len(values)
 
 
 def main():
@@ -146,6 +199,18 @@ def main():
     episode_success_counts = []
     episode_truncated_counts = []
     episode_step_counts = []
+    rollout_initial_ball_to_basket_distances: list[float] = []
+    rollout_final_ball_to_basket_distances: list[float] = []
+    rollout_min_ball_to_basket_distances: list[float] = []
+    rollout_ball_to_basket_improvements: list[float] = []
+    rollout_initial_ee_to_ball_distances: list[float] = []
+    rollout_final_ee_to_ball_distances: list[float] = []
+    rollout_min_ee_to_ball_distances: list[float] = []
+    rollout_max_ball_heights: list[float] = []
+    rollout_ball_height_gains: list[float] = []
+    rollout_ever_close_to_ball: list[bool] = []
+    rollout_ever_close_to_basket: list[bool] = []
+    rollout_ever_lifted_ball: list[bool] = []
 
     with torch.inference_mode():
         for episode_idx in range(args_cli.num_episodes):
@@ -155,6 +220,18 @@ def main():
                 raise RuntimeError(
                     f"Checkpoint obs_dim={config['obs_dim']} but environment returns obs_dim={obs_tensor.shape[-1]}."
                 )
+            ee_to_ball, ball_to_basket, ball_height = _state_distances(obs_tensor)
+            initial_ee_to_ball = ee_to_ball.clone()
+            initial_ball_to_basket = ball_to_basket.clone()
+            initial_ball_height = ball_height.clone()
+            final_ee_to_ball = ee_to_ball.clone()
+            final_ball_to_basket = ball_to_basket.clone()
+            min_ee_to_ball = ee_to_ball.clone()
+            min_ball_to_basket = ball_to_basket.clone()
+            max_ball_height = ball_height.clone()
+            ever_close_to_ball = ee_to_ball <= args_cli.close_to_ball_threshold
+            ever_close_to_basket = ball_to_basket <= args_cli.close_to_basket_threshold
+            ever_lifted_ball = ball_height >= initial_ball_height + args_cli.lift_height_threshold
             obs_history = _make_obs_history(obs_tensor, int(config["obs_horizon"]))
             success_seen = torch.zeros((args_cli.num_envs,), dtype=torch.bool, device=device)
             truncated_seen = torch.zeros((args_cli.num_envs,), dtype=torch.bool, device=device)
@@ -180,6 +257,15 @@ def main():
                     obs, _, terminated, truncated, _ = env.step(actions)
                     obs_tensor = policy_obs(obs).to(device)
                     obs_history.append(obs_tensor.clone())
+                    ee_to_ball, ball_to_basket, ball_height = _state_distances(obs_tensor)
+                    final_ee_to_ball = ee_to_ball.clone()
+                    final_ball_to_basket = ball_to_basket.clone()
+                    min_ee_to_ball = torch.minimum(min_ee_to_ball, ee_to_ball)
+                    min_ball_to_basket = torch.minimum(min_ball_to_basket, ball_to_basket)
+                    max_ball_height = torch.maximum(max_ball_height, ball_height)
+                    ever_close_to_ball |= ee_to_ball <= args_cli.close_to_ball_threshold
+                    ever_close_to_basket |= ball_to_basket <= args_cli.close_to_basket_threshold
+                    ever_lifted_ball |= ball_height >= initial_ball_height + args_cli.lift_height_threshold
                     terminated_bool = terminated.to(device=device, dtype=torch.bool)
                     truncated_bool = truncated.to(device=device, dtype=torch.bool)
                     success_seen |= terminated_bool
@@ -194,6 +280,20 @@ def main():
             episode_success_counts.append(episode_success)
             episode_truncated_counts.append(episode_truncated)
             episode_step_counts.append(step_count)
+            _extend_metric_list(rollout_initial_ball_to_basket_distances, initial_ball_to_basket)
+            _extend_metric_list(rollout_final_ball_to_basket_distances, final_ball_to_basket)
+            _extend_metric_list(rollout_min_ball_to_basket_distances, min_ball_to_basket)
+            _extend_metric_list(
+                rollout_ball_to_basket_improvements, initial_ball_to_basket - final_ball_to_basket
+            )
+            _extend_metric_list(rollout_initial_ee_to_ball_distances, initial_ee_to_ball)
+            _extend_metric_list(rollout_final_ee_to_ball_distances, final_ee_to_ball)
+            _extend_metric_list(rollout_min_ee_to_ball_distances, min_ee_to_ball)
+            _extend_metric_list(rollout_max_ball_heights, max_ball_height)
+            _extend_metric_list(rollout_ball_height_gains, max_ball_height - initial_ball_height)
+            _extend_bool_metric_list(rollout_ever_close_to_ball, ever_close_to_ball)
+            _extend_bool_metric_list(rollout_ever_close_to_basket, ever_close_to_basket)
+            _extend_bool_metric_list(rollout_ever_lifted_ball, ever_lifted_ball)
             print(
                 f"[INFO]: episode {episode_idx + 1}/{args_cli.num_episodes} "
                 f"success={episode_success}/{args_cli.num_envs} truncated={episode_truncated}/{args_cli.num_envs}"
@@ -222,6 +322,33 @@ def main():
         "episode_success_counts": episode_success_counts,
         "episode_truncated_counts": episode_truncated_counts,
         "episode_step_counts": episode_step_counts,
+        "close_to_ball_threshold": args_cli.close_to_ball_threshold,
+        "close_to_basket_threshold": args_cli.close_to_basket_threshold,
+        "lift_height_threshold": args_cli.lift_height_threshold,
+        "mean_initial_ball_to_basket_distance": _mean(rollout_initial_ball_to_basket_distances),
+        "mean_final_ball_to_basket_distance": _mean(rollout_final_ball_to_basket_distances),
+        "mean_min_ball_to_basket_distance": _mean(rollout_min_ball_to_basket_distances),
+        "mean_ball_to_basket_improvement": _mean(rollout_ball_to_basket_improvements),
+        "mean_initial_ee_to_ball_distance": _mean(rollout_initial_ee_to_ball_distances),
+        "mean_final_ee_to_ball_distance": _mean(rollout_final_ee_to_ball_distances),
+        "mean_min_ee_to_ball_distance": _mean(rollout_min_ee_to_ball_distances),
+        "mean_max_ball_height": _mean(rollout_max_ball_heights),
+        "mean_ball_height_gain": _mean(rollout_ball_height_gains),
+        "ever_close_to_ball_rate": _fraction(rollout_ever_close_to_ball),
+        "ever_close_to_basket_rate": _fraction(rollout_ever_close_to_basket),
+        "ever_lifted_ball_rate": _fraction(rollout_ever_lifted_ball),
+        "rollout_initial_ball_to_basket_distances": rollout_initial_ball_to_basket_distances,
+        "rollout_final_ball_to_basket_distances": rollout_final_ball_to_basket_distances,
+        "rollout_min_ball_to_basket_distances": rollout_min_ball_to_basket_distances,
+        "rollout_ball_to_basket_improvements": rollout_ball_to_basket_improvements,
+        "rollout_initial_ee_to_ball_distances": rollout_initial_ee_to_ball_distances,
+        "rollout_final_ee_to_ball_distances": rollout_final_ee_to_ball_distances,
+        "rollout_min_ee_to_ball_distances": rollout_min_ee_to_ball_distances,
+        "rollout_max_ball_heights": rollout_max_ball_heights,
+        "rollout_ball_height_gains": rollout_ball_height_gains,
+        "rollout_ever_close_to_ball": rollout_ever_close_to_ball,
+        "rollout_ever_close_to_basket": rollout_ever_close_to_basket,
+        "rollout_ever_lifted_ball": rollout_ever_lifted_ball,
     }
     with open(metrics_path, "w", encoding="utf-8") as metrics_file:
         json.dump(metrics, metrics_file, indent=2)
@@ -230,6 +357,10 @@ def main():
     print(f"[INFO]: Total rollouts: {total_rollouts}")
     print(f"[INFO]: Success count: {success_count}")
     print(f"[INFO]: Success rate: {success_rate:.3f}")
+    print(f"[INFO]: Mean min ee-to-ball distance: {metrics['mean_min_ee_to_ball_distance']:.4f}")
+    print(f"[INFO]: Mean final ball-to-basket distance: {metrics['mean_final_ball_to_basket_distance']:.4f}")
+    print(f"[INFO]: Ever close to ball rate: {metrics['ever_close_to_ball_rate']:.3f}")
+    print(f"[INFO]: Ever lifted ball rate: {metrics['ever_lifted_ball_rate']:.3f}")
     print(f"[INFO]: Terminated count: {terminated_count}")
     print(f"[INFO]: Truncated count: {truncated_count}")
     print(f"[INFO]: Wrote metrics JSON to: {os.path.abspath(metrics_path)}")
